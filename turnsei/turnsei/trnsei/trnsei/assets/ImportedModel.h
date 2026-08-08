@@ -1,0 +1,163 @@
+#pragma once
+
+#include <glew.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <cstddef>
+#include <string>
+#include <vector>
+
+class ImportedModel
+{
+public:
+    /// 描画メッシュ、マテリアル、スケルトン、内蔵アニメーションを読み込む。
+    /// 背景モデルでは正規化を無効にし、描画と当たり判定で同じ実寸を維持できる。
+    bool load(const std::string& filePath, bool normalizeStatic = true);
+
+    /// 再生中クリップの時刻を進め、CPUスキニング後の頂点をGPUへ転送する。
+    void updateAnimation(float deltaSeconds);
+    bool playAnimationByName(const std::string& keyword);
+    bool playAnimationByIndex(size_t index);
+    void resetAnimationPose();
+    void draw() const;
+    bool isLoaded() const { return vao != 0 && indexCount > 0; }
+    bool hasAnimation() const { return animated; }
+    // 現在のアニメーション姿勢におけるボーン原点を、正規化済みモデル座標で返す。
+    // 武器やエフェクトをスキニング済みの手足へ追従させる用途に使用する。
+    bool getBonePosePosition(const std::string& boneName, glm::vec3& position) const;
+    // 平行移動を正規化し、回転軸の長さを1へ揃えたボーン姿勢を返す。
+    // モデルの大きさに武器寸法を巻き込まず、手首の向きだけを継承できる。
+    bool getBonePoseTransform(const std::string& boneName, glm::mat4& transform) const;
+    size_t getAnimationCount() const { return animations.size(); }
+    std::string getAnimationName(size_t index) const;
+    int findAnimationByKeywords(const std::vector<std::string>& keywords) const;
+    // 別FBXファイルからアニメーションクリップだけ追加読み込み
+    /// 同じスケルトンを持つ別FBXから、アニメーションクリップだけを追加する。
+    bool loadAnimationsFrom(const std::string& filePath, const std::string& clipName = "");
+
+    /// Blenderでフレームサンプリングした差分姿勢JSONを追加する。
+    bool loadAnimationJson(const std::string& filePath);
+
+    /// キャラクターの垂直円柱と、モデルから生成した壁面判定との交差を調べる。
+    bool collidesCylinder(const glm::vec3& position, float radius,
+                          float height) const;
+
+    /// 指定したXZ座標にある歩行可能面の高さを返す。
+    float sampleWalkableHeight(float x, float z, float fallbackHeight,
+                               float maxStepUp = 1.6f,
+                               float footprintRadius = 0.20f) const;
+
+private:
+    struct DrawPart
+    {
+        GLsizei indexCount = 0;
+        GLsizei indexOffset = 0;
+        GLuint textureId = 0;
+        float roughness = 0.72f;
+        float metallic = 0.0f;
+        glm::vec3 emission = glm::vec3(0.0f);
+        float opacity = 1.0f;
+    };
+
+    GLuint vao = 0;
+    GLuint vbo = 0;
+    GLuint ebo = 0;
+    GLsizei indexCount = 0;
+    std::vector<DrawPart> drawParts;
+
+    struct VertexGpu
+    {
+        glm::vec3 position;
+        glm::vec3 normal;
+        glm::vec3 color;
+        glm::vec2 texCoords;
+    };
+
+    struct VertexSource
+    {
+        glm::vec3 position;
+        glm::vec3 normal;
+        glm::vec3 color;
+        glm::vec2 texCoords;
+        int boneIds[4] = { -1, -1, -1, -1 };
+        float boneWeights[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    };
+
+    struct Bone
+    {
+        std::string name;
+        glm::mat4 offset = glm::mat4(1.0f);
+        glm::mat4 finalTransform = glm::mat4(1.0f);
+        glm::mat4 poseTransform = glm::mat4(1.0f);
+    };
+
+    struct Node
+    {
+        std::string name;
+        glm::mat4 transform = glm::mat4(1.0f);
+        std::vector<int> children;
+    };
+
+    struct VecKey
+    {
+        double time = 0.0;
+        glm::vec3 value = glm::vec3(0.0f);
+    };
+
+    struct QuatKey
+    {
+        double time = 0.0;
+        glm::quat value = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    };
+
+    struct Channel
+    {
+        std::string nodeName;
+        std::vector<VecKey> positions;
+        std::vector<QuatKey> rotations;
+        std::vector<VecKey> scales;
+    };
+
+    struct AnimationClip
+    {
+        std::string name;
+        double duration = 0.0;
+        double ticksPerSecond = 25.0;
+        bool poseDelta = false;
+        std::vector<Channel> channels;
+    };
+
+    bool animated = false;
+    size_t activeAnimationIndex = 0;
+    float animationTimeSeconds = 0.0f;
+    glm::vec3 boundsMin = glm::vec3(0.0f);
+    glm::vec3 boundsMax = glm::vec3(0.0f);
+    glm::vec3 normalizationCenter = glm::vec3(0.0f);
+    float normalizationScale = 1.0f;
+    glm::mat4 worldTransform = glm::mat4(1.0f);
+    glm::mat4 worldTransformInverse = glm::mat4(1.0f);
+    glm::mat3 worldNormalMatrix = glm::mat3(1.0f);
+    std::vector<VertexSource> sourceVertices;
+    std::vector<VertexGpu> gpuVertices;
+    std::vector<VertexGpu> transitionFromVertices;
+    float animationTransitionRemaining = 0.0f;
+    float animationTransitionDuration = 0.18f;
+    std::vector<Bone> bones;
+    std::vector<Node> nodes;
+    std::vector<AnimationClip> animations;
+    struct CollisionTriangle
+    {
+        glm::vec2 a, b, c;
+        float minY = 0.0f;
+        float maxY = 0.0f;
+    };
+    // フィールド移動は水平面上で解決するため三角形をXZ平面へ投影する。
+    // 高さ範囲も保持し、橋や上階が地上のキャラクターを塞がないようにする。
+    std::vector<CollisionTriangle> collisionTriangles;
+
+    struct WalkableTriangle
+    {
+        glm::vec3 a, b, c;
+    };
+    std::vector<WalkableTriangle> walkableTriangles;
+};

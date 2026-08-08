@@ -1,0 +1,64 @@
+# Third-Party Notices
+
+TIDEGLASS - 潮鏡都市では、以下の外部ライブラリを使用しています。
+
+## GLFW
+
+- 用途: ウィンドウ生成、入力処理、OpenGLコンテキスト
+- 公式サイト: https://www.glfw.org/
+- ソース: https://github.com/glfw/glfw
+- ライセンス: zlib/libpng license
+- 変更: なし
+
+ライセンス全文:
+`licenses/GLFW-LICENSE.md`
+
+## GLEW
+
+- 用途: OpenGL拡張機能の読み込み
+- ソース: https://github.com/nigels-com/glew
+- ライセンス: Modified BSD / MIT等を含む複合ライセンス
+- 変更: なし
+
+ライセンス全文:
+`licenses/GLEW-LICENSE.txt`
+
+## GLM
+
+- 用途: ベクトル、行列、3D座標計算
+- ソース: https://github.com/g-truc/glm
+- ライセンス: Happy Bunny License / MIT License
+- 変更: なし
+
+ライセンス全文:
+`licenses/GLM-LICENSE.txt`
+
+## Assimp
+
+- 用途: FBX・GLBモデルの読み込み
+- ソース: https://github.com/assimp/assimp
+- ライセンス: BSD 3-Clause License
+- 変更: なし
+
+ライセンス全文:
+`licenses/ASSIMP-LICENSE.txt`
+
+## Dear ImGui
+
+- 用途: 戦闘UI、設定画面、所持品画面
+- ソース: https://github.com/ocornut/imgui
+- ライセンス: MIT License
+- 変更: ゲーム用UIコードから利用
+
+ライセンス全文:
+`licenses/IMGUI-LICENSE.txt`
+
+## nlohmann/json
+
+- 用途: JSONデータの読み込み
+- ソース: https://github.com/nlohmann/json
+- ライセンス: MIT License
+- 変更: なし
+
+ライセンス全文:
+`licenses/NLOHMANN-JSON-LICENSE.txt`

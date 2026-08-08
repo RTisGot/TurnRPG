@@ -1,0 +1,22 @@
+#pragma once
+#include <glm/glm.hpp>
+
+void InitSimpleMap();
+void DrawSimpleMap(const glm::mat4& view, const glm::mat4& projection, const glm::vec3& cameraPos);
+float GetTerrainHeight(float x, float z);
+
+/// 表示中の街モデルから生成した判定に対して水平移動を解決する。
+/// X軸とZ軸を分けて判定するため、壁に沿った移動を維持できる。
+glm::vec3 ResolveMapCollision(const glm::vec3& from, const glm::vec3& desired, float radius);
+
+/// `position` の足元にある路面種別に応じた移動特性を返す。
+float GetMapMoveSpeedMultiplier(const glm::vec3& position);
+
+enum class MapSurfaceType { Soil, WetAsphalt, Concrete, ShallowWater };
+struct MapSurfaceProperties {
+    MapSurfaceType type = MapSurfaceType::Soil;
+    float speedMultiplier = 1.0f;
+    float traction = 0.82f;
+    float linearDrag = 0.10f;
+};
+MapSurfaceProperties GetMapSurfaceProperties(const glm::vec3& position);

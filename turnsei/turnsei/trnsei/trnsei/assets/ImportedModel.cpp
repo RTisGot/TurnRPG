@@ -1,0 +1,1165 @@
+#include <glew.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
+#include "ImportedModel.h"
+
+#include <assimp/Importer.hpp>
+#include <assimp/material.h>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstddef>
+#include <cstdlib>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <string>
+#include <vector>
+#include <fstream>
+#include "../json.hpp"
+
+namespace
+{
+    std::string ToLowerCopy(const std::string& text);
+
+    std::string DirectoryOf(const std::string& path)//ファイルパスを受け取る
+    {
+        size_t slash = path.find_last_of("/\\"); //　/ または \が最後にあるか探す
+        return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);//見つからなかった場合//見つかった場合
+    }
+
+    bool FileExistsLocal(const std::string& path)
+    {
+        FILE* file = nullptr;              //ポインタを作る
+        fopen_s(&file, path.c_str(), "rb");//fileを開く//読み込み専用
+        if (!file) return false;
+        fclose(file);                      //fileを閉じる
+        return true;
+    }
+
+    std::string ResolveTexturePath(const std::string& modelDirectory, const aiString& texturePath)
+    {
+        std::string path = texturePath.C_Str();//string型に変換
+        if (path.empty() || path[0] == '*') return path;
+        for (char& c : path) {
+            if (c == '\\') c = '/';
+        }
+        if (FileExistsLocal(path)) return path;
+        std::string joined = modelDirectory + path;
+        if (FileExistsLocal(joined)) return joined;
+        size_t slash = path.find_last_of('/');
+        if (slash != std::string::npos) {
+            std::string fileNameOnly = modelDirectory + path.substr(slash + 1);
+            if (FileExistsLocal(fileNameOnly)) return fileNameOnly;
+        }
+        return joined;
+    }
+
+    GLuint CreateTextureFromPixels(unsigned char* pixels, int width, int height, int channels)
+    {
+        if (!pixels || width <= 0 || height <= 0) return 0;
+
+        GLenum sourceFormat = channels == 4 ? GL_RGBA : GL_RGB;
+        GLuint texture = 0;
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, sourceFormat, width, height, 0, sourceFormat, GL_UNSIGNED_BYTE, pixels);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return texture;
+    }
+
+    GLuint LoadTextureFile(const std::string& path)
+    {
+        stbi_set_flip_vertically_on_load(false);
+        int width = 0;
+        int height = 0;
+        int channels = 0;
+        unsigned char* pixels = stbi_load(path.c_str(), &width, &height, &channels, 0);
+        GLuint texture = CreateTextureFromPixels(pixels, width, height, channels);
+        stbi_image_free(pixels);
+        if (texture == 0) {
+            std::cerr << "Could not load texture: " << path << std::endl;
+        }
+        return texture;
+    }
+
+    GLuint LoadEmbeddedTexture(const aiScene* scene, const aiString& texturePath)
+    {
+        std::string path = texturePath.C_Str();
+        if (path.empty() || path[0] != '*') return 0;
+
+        int textureIndex = std::atoi(path.c_str() + 1);
+        if (textureIndex < 0 || static_cast<unsigned int>(textureIndex) >= scene->mNumTextures) return 0;
+
+        const aiTexture* texture = scene->mTextures[textureIndex];
+        if (!texture) return 0;
+
+        if (texture->mHeight == 0) {
+            int width = 0;
+            int height = 0;
+            int channels = 0;
+            unsigned char* pixels = stbi_load_from_memory(
+                reinterpret_cast<const stbi_uc*>(texture->pcData),
+                static_cast<int>(texture->mWidth),
+                &width,
+                &height,
+                &channels,
+                0
+            );
+            GLuint textureId = CreateTextureFromPixels(pixels, width, height, channels);
+            stbi_image_free(pixels);
+            return textureId;
+        }
+
+        return CreateTextureFromPixels(
+            reinterpret_cast<unsigned char*>(texture->pcData),
+            static_cast<int>(texture->mWidth),
+            static_cast<int>(texture->mHeight),
+            4
+        );
+    }
+
+    glm::vec3 ReadMaterialColor(const aiScene* scene, const aiMesh* mesh)
+    {
+        glm::vec3 color(0.85f, 0.82f, 0.76f);
+        if (!scene->HasMaterials() || mesh->mMaterialIndex >= scene->mNumMaterials) {
+            return color;
+        }
+
+        aiColor4D materialColor;
+        const aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
+        if (AI_SUCCESS == aiGetMaterialColor(material, AI_MATKEY_BASE_COLOR, &materialColor) ||
+            AI_SUCCESS == aiGetMaterialColor(material, AI_MATKEY_COLOR_DIFFUSE, &materialColor)) {
+            color = glm::vec3(materialColor.r, materialColor.g, materialColor.b);
+        }
+        return glm::clamp(color, glm::vec3(0.02f), glm::vec3(1.0f));
+    }
+
+    glm::vec3 ApplyAuthoredMaterialColor(const aiMaterial* material, const glm::vec3& imported)
+    {
+        if (!material) return imported;
+        aiString name;
+        material->Get(AI_MATKEY_NAME, name);
+        const std::string n = ToLowerCopy(name.C_Str());
+        // BlenderのプロシージャルノードはglTFへ完全変換できないため、
+        // 読み込み結果が白色になる場合がある。白へフォールバックせず、
+        // FC01アセットで定義した色調をマテリアル名から補完する。
+        if (n.find("asphalt") != std::string::npos) return glm::vec3(.045f, .065f, .070f);
+        if (n.find("concrete_wet") != std::string::npos) return glm::vec3(.10f, .17f, .18f);
+        if (n.find("concrete") != std::string::npos) return glm::vec3(.28f, .32f, .33f);
+        if (n.find("algae") != std::string::npos) return glm::vec3(.055f, .19f, .13f);
+        if (n.find("salt") != std::string::npos) return glm::vec3(.72f, .71f, .65f);
+        if (n.find("rust") != std::string::npos) return glm::vec3(.28f, .075f, .025f);
+        if (n.find("steel") != std::string::npos) return glm::vec3(.22f, .28f, .29f);
+        if (n.find("glass") != std::string::npos) return glm::vec3(.08f, .19f, .21f);
+        if (n.find("tideglass") != std::string::npos) return glm::vec3(.015f, .30f, .34f);
+        if (n.find("amber") != std::string::npos) return glm::vec3(.32f, .11f, .025f);
+        if (n.find("water") != std::string::npos) return glm::vec3(.012f, .105f, .12f);
+        return imported;
+    }
+
+    glm::mat4 ToGlm(const aiMatrix4x4& value)
+    {
+        glm::mat4 result(1.0f);
+        result[0][0] = value.a1; result[1][0] = value.a2; result[2][0] = value.a3; result[3][0] = value.a4;
+        result[0][1] = value.b1; result[1][1] = value.b2; result[2][1] = value.b3; result[3][1] = value.b4;
+        result[0][2] = value.c1; result[1][2] = value.c2; result[2][2] = value.c3; result[3][2] = value.c4;
+        result[0][3] = value.d1; result[1][3] = value.d2; result[2][3] = value.d3; result[3][3] = value.d4;
+        return result;
+    }
+
+    std::string ToLowerCopy(const std::string& text)
+    {
+        std::string result = text;
+        std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return result;
+    }
+
+    GLuint ReadMaterialTexture(const aiScene* scene, const aiMesh* mesh, const std::string& modelDirectory)
+    {
+        if (!scene->HasMaterials() || mesh->mMaterialIndex >= scene->mNumMaterials) {
+            return 0;
+        }
+
+        const aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
+        aiString texturePath;
+        if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texturePath) != AI_SUCCESS &&
+            material->GetTexture(aiTextureType_DIFFUSE, 0, &texturePath) != AI_SUCCESS) {
+            return 0;
+        }
+
+        // Blender/FBXは、画像が割り当てられていないマテリアルでも「.」を
+        // テクスチャ参照として出力することがある。これをモデルフォルダーへ
+        // 結合すると Resource/. を画像として開いてしまうため、未指定扱いにする。
+        const std::string rawTexturePath = texturePath.C_Str();
+        if (rawTexturePath.empty() || rawTexturePath == "." || rawTexturePath == "./" ||
+            rawTexturePath == ".\\") {
+            return 0;
+        }
+
+        if (texturePath.length > 0 && texturePath.C_Str()[0] == '*') {
+            return LoadEmbeddedTexture(scene, texturePath);
+        }
+
+        return LoadTextureFile(ResolveTexturePath(modelDirectory, texturePath));
+    }
+}
+
+bool ImportedModel::load(const std::string& filePath, bool normalizeStatic)
+{
+    Assimp::Importer importer;
+    const aiScene* scene = importer.ReadFile(
+        filePath,
+        aiProcess_Triangulate |
+        aiProcess_JoinIdenticalVertices |
+        aiProcess_ImproveCacheLocality |
+        aiProcess_GenSmoothNormals |
+        aiProcess_FlipUVs
+    );
+
+    if (!scene || !scene->mRootNode || scene->mNumMeshes == 0) {
+        std::cerr << "Could not load model '" << filePath << "': "
+            << importer.GetErrorString() << std::endl;
+        return false;
+    }
+
+    std::vector<unsigned int> indices;
+    std::vector<DrawPart> newDrawParts;
+    std::map<std::string, int> boneLookup;
+    bool sceneHasAnimation = scene->mNumAnimations > 0;
+    sourceVertices.clear();
+    gpuVertices.clear();
+    collisionTriangles.clear();
+    walkableTriangles.clear();
+    bones.clear();
+    nodes.clear();
+    animations.clear();
+    animated = false;
+    activeAnimationIndex = 0;
+    animationTimeSeconds = 0.0f;
+    boundsMin = glm::vec3(std::numeric_limits<float>::max());
+    boundsMax = glm::vec3(std::numeric_limits<float>::lowest());
+    std::string modelDirectory = DirectoryOf(filePath);
+
+    std::function<int(const aiNode*)> copyNode = [&](const aiNode* sourceNode) -> int {
+        Node node{};
+        node.name = sourceNode->mName.C_Str();
+        node.transform = ToGlm(sourceNode->mTransformation);
+        int index = static_cast<int>(nodes.size());
+        nodes.push_back(node);
+        for (unsigned int i = 0; i < sourceNode->mNumChildren; ++i) {
+            int childIndex = copyNode(sourceNode->mChildren[i]);
+            nodes[index].children.push_back(childIndex);
+        }
+        return index;
+    };
+    copyNode(scene->mRootNode);
+
+    std::map<unsigned int, glm::mat4> meshGlobalTransforms;
+    std::function<void(const aiNode*, const glm::mat4&)> findMeshTransforms =
+        [&](const aiNode* node, const glm::mat4& parentGlobal) {
+            glm::mat4 globalTransform = parentGlobal * ToGlm(node->mTransformation);
+            for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
+                meshGlobalTransforms[node->mMeshes[i]] = globalTransform;
+            }
+            for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+                findMeshTransforms(node->mChildren[i], globalTransform);
+            }
+        };
+    findMeshTransforms(scene->mRootNode, glm::mat4(1.0f));
+
+    if (!meshGlobalTransforms.empty()) {
+        worldTransform = meshGlobalTransforms.begin()->second;
+    }
+    else {
+        worldTransform = ToGlm(scene->mRootNode->mTransformation);
+    }
+    worldTransformInverse = glm::inverse(worldTransform);
+    worldNormalMatrix = glm::mat3(worldTransform);
+
+    for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex) {
+        const aiMesh* mesh = scene->mMeshes[meshIndex];
+
+        const glm::mat4 meshTransform = meshGlobalTransforms.count(meshIndex)
+            ? meshGlobalTransforms[meshIndex] : glm::mat4(1.0f);
+        const glm::mat3 meshNormalTransform = glm::transpose(
+            glm::inverse(glm::mat3(meshTransform)));
+        // 環境GLBは各部品が別ノードのlocal座標を持つ。静的モデルでは
+        // 読込時に各ノード変換を頂点へ焼き、描画と衝突を同じ空間へ揃える。
+        const bool bakeStaticNodeTransform =
+            scene->mNumAnimations == 0 && mesh->mNumBones == 0;
+
+        unsigned int vertexOffset = static_cast<unsigned int>(sourceVertices.size());
+        unsigned int indexOffset = static_cast<unsigned int>(indices.size());
+        const aiMaterial* meshMaterial = scene->HasMaterials() && mesh->mMaterialIndex < scene->mNumMaterials
+            ? scene->mMaterials[mesh->mMaterialIndex] : nullptr;
+        glm::vec3 materialColor = ApplyAuthoredMaterialColor(
+            meshMaterial, ReadMaterialColor(scene, mesh));
+        GLuint textureId = ReadMaterialTexture(scene, mesh, modelDirectory);
+
+        // 描画されない補助メッシュや水面を衝突形状へ混ぜない。
+        // GLBは非表示オブジェクトも通常のmeshとしてAssimpへ渡す場合があり、
+        // 全meshから判定を作ると、画面には何もない場所に壁だけが残る。
+        ai_real collisionOpacity = 1.0f;
+        std::string collisionLabel = ToLowerCopy(mesh->mName.C_Str());
+        if (meshMaterial) {
+            meshMaterial->Get(AI_MATKEY_OPACITY, collisionOpacity);
+            aiString collisionMaterialName;
+            if (meshMaterial->Get(AI_MATKEY_NAME, collisionMaterialName) == AI_SUCCESS) {
+                collisionLabel += " ";
+                collisionLabel += ToLowerCopy(collisionMaterialName.C_Str());
+            }
+        }
+        const auto hasCollisionExcludedLabel = [&collisionLabel](const char* label) {
+            return collisionLabel.find(label) != std::string::npos;
+        };
+        const bool collisionEnabled = collisionOpacity >= 0.80f &&
+            !hasCollisionExcludedLabel("water") &&
+            !hasCollisionExcludedLabel("ocean") &&
+            !hasCollisionExcludedLabel("sea") &&
+            !hasCollisionExcludedLabel("glass") &&
+            !hasCollisionExcludedLabel("decal") &&
+            !hasCollisionExcludedLabel("foam") &&
+            !hasCollisionExcludedLabel("spray") &&
+            !hasCollisionExcludedLabel("mist") &&
+            !hasCollisionExcludedLabel("vfx") &&
+            !hasCollisionExcludedLabel("collision") &&
+            !hasCollisionExcludedLabel("collider") &&
+            !hasCollisionExcludedLabel("ucx_");
+
+        for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+            VertexSource vertex{};
+            const glm::vec3 localPosition(
+                mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z);
+            vertex.position = bakeStaticNodeTransform
+                ? glm::vec3(meshTransform * glm::vec4(localPosition, 1.0f))
+                : localPosition;
+            if (mesh->HasNormals()) {
+                const glm::vec3 localNormal(
+                    mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z);
+                vertex.normal = bakeStaticNodeTransform
+                    ? glm::normalize(meshNormalTransform * localNormal)
+                    : localNormal;
+            }
+            else {
+                vertex.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+            }
+            vertex.color = materialColor;
+            if (mesh->HasVertexColors(0)) {
+                const aiColor4D& vertexColor = mesh->mColors[0][i];
+                vertex.color = glm::vec3(vertexColor.r, vertexColor.g, vertexColor.b);
+            }
+            if (mesh->HasTextureCoords(0)) {
+                vertex.texCoords = glm::vec2(mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y);
+            }
+            sourceVertices.push_back(vertex);
+            glm::vec3 worldPos = bakeStaticNodeTransform
+                ? vertex.position
+                : glm::vec3(worldTransform * glm::vec4(vertex.position, 1.0f));
+            boundsMin = glm::min(boundsMin, worldPos);
+            boundsMax = glm::max(boundsMax, worldPos);
+        }
+
+        for (unsigned int boneIndex = 0; boneIndex < mesh->mNumBones; ++boneIndex) {
+            const aiBone* assimpBone = mesh->mBones[boneIndex];
+            std::string boneName = assimpBone->mName.C_Str();
+            int importedBoneIndex = 0;
+            auto foundBone = boneLookup.find(boneName);
+            if (foundBone == boneLookup.end()) {
+                Bone bone{};
+                bone.name = boneName;
+                bone.offset = ToGlm(assimpBone->mOffsetMatrix);
+                importedBoneIndex = static_cast<int>(bones.size());
+                bones.push_back(bone);
+                boneLookup[boneName] = importedBoneIndex;
+            }
+            else {
+                importedBoneIndex = foundBone->second;
+            }
+
+            for (unsigned int weightIndex = 0; weightIndex < assimpBone->mNumWeights; ++weightIndex) {
+                const aiVertexWeight& weight = assimpBone->mWeights[weightIndex];
+                unsigned int sourceIndex = vertexOffset + weight.mVertexId;
+                if (sourceIndex >= sourceVertices.size()) continue;
+
+                VertexSource& vertex = sourceVertices[sourceIndex];
+                int slot = -1;
+                for (int i = 0; i < 4; ++i) {
+                    if (vertex.boneWeights[i] <= 0.0f) {
+                        slot = i;
+                        break;
+                    }
+                }
+                if (slot < 0) {
+                    slot = 0;
+                    for (int i = 1; i < 4; ++i) {
+                        if (vertex.boneWeights[i] < vertex.boneWeights[slot]) slot = i;
+                    }
+                    if (vertex.boneWeights[slot] >= weight.mWeight) continue;
+                }
+                vertex.boneIds[slot] = importedBoneIndex;
+                vertex.boneWeights[slot] = weight.mWeight;
+            }
+        }
+
+        for (unsigned int i = 0; i < mesh->mNumFaces; ++i) {
+            const aiFace& face = mesh->mFaces[i];
+            if (face.mNumIndices == 3) {
+                glm::vec3 p[3];
+                for (int corner = 0; corner < 3; ++corner) {
+                    const aiVector3D& source = mesh->mVertices[face.mIndices[corner]];
+                    p[corner] = glm::vec3(meshTransform *
+                        glm::vec4(source.x, source.y, source.z, 1.0f));
+                }
+                const glm::vec3 crossValue = glm::cross(p[1] - p[0], p[2] - p[0]);
+                const float area2 = glm::length(crossValue);
+                if (area2 > 0.002f) {
+                    const glm::vec3 normal = crossValue / area2;
+                    // 床、屋根、水面を障害物にしないため、上向き面は除外する。
+                    // 法線がほぼ水平を向く壁、柱、瓦礫だけを移動判定へ登録する。
+                    if (collisionEnabled && std::abs(normal.y) < 0.72f) {
+                        CollisionTriangle collision{};
+                        collision.a = glm::vec2(p[0].x, p[0].z);
+                        collision.b = glm::vec2(p[1].x, p[1].z);
+                        collision.c = glm::vec2(p[2].x, p[2].z);
+                        collision.minY = std::min(p[0].y, std::min(p[1].y, p[2].y));
+                        collision.maxY = std::max(p[0].y, std::max(p[1].y, p[2].y));
+                        collisionTriangles.push_back(collision);
+                    }
+                    else if (collisionEnabled && std::abs(normal.y) >= 0.72f) {
+                        walkableTriangles.push_back({ p[0], p[1], p[2] });
+                    }
+                }
+            }
+            for (unsigned int j = 0; j < face.mNumIndices; ++j) {
+                indices.push_back(vertexOffset + face.mIndices[j]);
+            }
+        }
+
+        DrawPart part{};
+        part.indexCount = static_cast<GLsizei>(indices.size() - indexOffset);
+        part.indexOffset = static_cast<GLsizei>(indexOffset);
+        part.textureId = textureId;
+        const aiMaterial* partMaterial = scene->HasMaterials() && mesh->mMaterialIndex < scene->mNumMaterials
+            ? scene->mMaterials[mesh->mMaterialIndex] : nullptr;
+        if (partMaterial) {
+            ai_real roughness = part.roughness;
+            ai_real metallic = part.metallic;
+            ai_real opacity = part.opacity;
+            partMaterial->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness);
+            partMaterial->Get(AI_MATKEY_METALLIC_FACTOR, metallic);
+            partMaterial->Get(AI_MATKEY_OPACITY, opacity);
+            part.roughness = static_cast<float>(roughness);
+            part.metallic = static_cast<float>(metallic);
+            part.opacity = static_cast<float>(opacity);
+
+            aiColor3D emissive(0.0f, 0.0f, 0.0f);
+            if (partMaterial->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS)
+                part.emission = glm::vec3(emissive.r, emissive.g, emissive.b);
+
+            aiString materialName;
+            partMaterial->Get(AI_MATKEY_NAME, materialName);
+            const std::string lowerName = ToLowerCopy(materialName.C_Str());
+            // マテリアル名から材質を分類し、都市アセット全体で粗さと金属度の
+            // 範囲を統一する。インポート形式による値の欠落もここで補完する。
+            if (lowerName.find("asphalt") != std::string::npos) {
+                part.roughness = lowerName.find("wet") != std::string::npos ? 0.28f : 0.91f;
+                part.metallic = 0.0f;
+            } else if (lowerName.find("concrete_wet") != std::string::npos) {
+                part.roughness = 0.28f; part.metallic = 0.0f;
+            } else if (lowerName.find("concrete") != std::string::npos) {
+                part.roughness = 0.82f; part.metallic = 0.0f;
+            } else if (lowerName.find("wet") != std::string::npos) {
+                part.roughness = 0.28f; part.metallic = 0.0f;
+            } else if (lowerName.find("rust") != std::string::npos) {
+                part.roughness = 0.67f; part.metallic = 0.22f;
+            } else if (lowerName.find("steel") != std::string::npos) {
+                part.roughness = 0.30f; part.metallic = 0.88f;
+            } else if (lowerName.find("glass") != std::string::npos) {
+                part.roughness = 0.075f; part.metallic = 0.0f; part.opacity = 0.42f;
+            } else if (lowerName.find("water") != std::string::npos) {
+                part.roughness = 0.055f; part.metallic = 0.0f; part.opacity = 0.74f;
+            } else if (lowerName.find("salt") != std::string::npos) {
+                part.roughness = 0.96f; part.metallic = 0.0f;
+            }
+        }
+        newDrawParts.push_back(part);
+    }
+
+    if (sourceVertices.empty() || indices.empty()) return false;
+
+    for (VertexSource& vertex : sourceVertices) {
+        float totalWeight = 0.0f;
+        for (int i = 0; i < 4; ++i) totalWeight += vertex.boneWeights[i];
+        if (totalWeight > 0.0001f) {
+            for (int i = 0; i < 4; ++i) vertex.boneWeights[i] /= totalWeight;
+        }
+    }
+
+    for (unsigned int animationIndex = 0; animationIndex < scene->mNumAnimations; ++animationIndex) {
+        const aiAnimation* assimpAnimation = scene->mAnimations[animationIndex];
+        if (!assimpAnimation) continue;
+
+        AnimationClip clip{};
+        clip.name = assimpAnimation->mName.length > 0
+            ? assimpAnimation->mName.C_Str()
+            : "Animation" + std::to_string(animationIndex);
+        clip.duration = assimpAnimation->mDuration;
+        clip.ticksPerSecond = assimpAnimation->mTicksPerSecond > 0.0 ? assimpAnimation->mTicksPerSecond : 25.0;
+        for (unsigned int channelIndex = 0; channelIndex < assimpAnimation->mNumChannels; ++channelIndex) {
+            const aiNodeAnim* assimpChannel = assimpAnimation->mChannels[channelIndex];
+            Channel channel{};
+            channel.nodeName = assimpChannel->mNodeName.C_Str();
+
+            for (unsigned int i = 0; i < assimpChannel->mNumPositionKeys; ++i) {
+                const aiVectorKey& key = assimpChannel->mPositionKeys[i];
+                channel.positions.push_back({ key.mTime, glm::vec3(key.mValue.x, key.mValue.y, key.mValue.z) });
+            }
+            for (unsigned int i = 0; i < assimpChannel->mNumRotationKeys; ++i) {
+                const aiQuatKey& key = assimpChannel->mRotationKeys[i];
+                channel.rotations.push_back({ key.mTime, glm::quat(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z) });
+            }
+            for (unsigned int i = 0; i < assimpChannel->mNumScalingKeys; ++i) {
+                const aiVectorKey& key = assimpChannel->mScalingKeys[i];
+                channel.scales.push_back({ key.mTime, glm::vec3(key.mValue.x, key.mValue.y, key.mValue.z) });
+            }
+            clip.channels.push_back(channel);
+        }
+        animations.push_back(clip);
+    }
+
+    animated = !animations.empty() && !bones.empty();
+
+    glm::vec3 size = boundsMax - boundsMin;
+    float largestDimension = std::max(size.x, std::max(size.y, size.z));
+    if (largestDimension <= 0.0001f) return false;
+
+    if (vao == 0) glGenVertexArrays(1, &vao);
+    if (vbo == 0) glGenBuffers(1, &vbo);
+    if (ebo == 0) glGenBuffers(1, &ebo);
+
+    indexCount = static_cast<GLsizei>(indices.size());
+    drawParts = newDrawParts;
+    gpuVertices.resize(sourceVertices.size());
+
+    if (animated) {
+        normalizationCenter = glm::vec3(0.0f);
+        normalizationScale = 1.0f;
+        for (size_t i = 0; i < sourceVertices.size(); ++i) {
+            gpuVertices[i].position = sourceVertices[i].position;
+            gpuVertices[i].normal = glm::normalize(sourceVertices[i].normal);
+            gpuVertices[i].color = sourceVertices[i].color;
+            gpuVertices[i].texCoords = sourceVertices[i].texCoords;
+        }
+
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, gpuVertices.size() * sizeof(VertexGpu), gpuVertices.data(), GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexGpu), reinterpret_cast<void*>(offsetof(VertexGpu, position)));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VertexGpu), reinterpret_cast<void*>(offsetof(VertexGpu, normal)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(VertexGpu), reinterpret_cast<void*>(offsetof(VertexGpu, color)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(VertexGpu), reinterpret_cast<void*>(offsetof(VertexGpu, texCoords)));
+        glEnableVertexAttribArray(3);
+        glBindVertexArray(0);
+
+        updateAnimation(0.0f);
+
+        glm::vec3 skinnedMin(std::numeric_limits<float>::max());
+        glm::vec3 skinnedMax(std::numeric_limits<float>::lowest());
+        for (const auto& v : gpuVertices) {
+            skinnedMin = glm::min(skinnedMin, v.position);
+            skinnedMax = glm::max(skinnedMax, v.position);
+        }
+
+        glm::vec3 skinnedSize = skinnedMax - skinnedMin;
+        normalizationScale = std::max(skinnedSize.x, std::max(skinnedSize.y, skinnedSize.z));
+        if (normalizationScale <= 0.0001f) return false;
+        normalizationCenter = glm::vec3(
+            (skinnedMin.x + skinnedMax.x) * 0.5f,
+            skinnedMin.y,
+            (skinnedMin.z + skinnedMax.z) * 0.5f
+        );
+
+        for (auto& v : gpuVertices) {
+            v.position = (v.position - normalizationCenter) / normalizationScale;
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, gpuVertices.size() * sizeof(VertexGpu), gpuVertices.data());
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+    else {
+        normalizationCenter = normalizeStatic
+            ? glm::vec3((boundsMin.x + boundsMax.x) * 0.5f, boundsMin.y, (boundsMin.z + boundsMax.z) * 0.5f)
+            : glm::vec3(0.0f);
+        normalizationScale = normalizeStatic ? largestDimension : 1.0f;
+        for (size_t i = 0; i < sourceVertices.size(); ++i) {
+            // 静的環境頂点には各ノード変換を既に焼いてある。
+            glm::vec3 worldPos = sourceVertices[i].position;
+            gpuVertices[i].position = (worldPos - normalizationCenter) / normalizationScale;
+            gpuVertices[i].normal = glm::normalize(sourceVertices[i].normal);
+            gpuVertices[i].color = sourceVertices[i].color;
+            gpuVertices[i].texCoords = sourceVertices[i].texCoords;
+        }
+
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, gpuVertices.size() * sizeof(VertexGpu), gpuVertices.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexGpu), reinterpret_cast<void*>(offsetof(VertexGpu, position)));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VertexGpu), reinterpret_cast<void*>(offsetof(VertexGpu, normal)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(VertexGpu), reinterpret_cast<void*>(offsetof(VertexGpu, color)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(VertexGpu), reinterpret_cast<void*>(offsetof(VertexGpu, texCoords)));
+        glEnableVertexAttribArray(3);
+        glBindVertexArray(0);
+    }
+
+    std::cout << "Loaded Blender model: " << filePath
+        << " (" << scene->mNumMeshes << " meshes"
+        << (animated ? ", animated clips: " + std::to_string(animations.size()) : "")
+        << ")" << std::endl;
+    for (size_t i = 0; i < animations.size(); ++i) {
+        std::cout << "  Animation[" << i << "]: \"" << animations[i].name
+            << "\" duration=" << animations[i].duration << std::endl;
+    }
+    return true;
+}
+
+bool ImportedModel::collidesCylinder(const glm::vec3& position, float radius,
+                                     float height) const
+{
+    // キャラクター円柱の中心をXZへ落とし、足元から頭までの高さ範囲を作る。
+    const glm::vec2 point(position.x, position.z);
+    const float bottom = position.y + 0.05f;
+    const float top = position.y + height;
+
+    // 三角形の辺と円中心の最短距離を求める。平方距離のまま比較し、
+    // 判定ループ内で高コストな平方根を実行しない。
+    auto segmentDistanceSquared = [](const glm::vec2& p,
+                                     const glm::vec2& a,
+                                     const glm::vec2& b) {
+        const glm::vec2 edge = b - a;
+        const float lengthSquared = glm::dot(edge, edge);
+        if (lengthSquared < 1e-8f) return glm::dot(p - a, p - a);
+        const float t = glm::clamp(glm::dot(p - a, edge) / lengthSquared,
+                                   0.0f, 1.0f);
+        const glm::vec2 delta = p - (a + edge * t);
+        return glm::dot(delta, delta);
+    };
+    // 各辺に対する符号付き面積を使い、中心が投影三角形の内側か調べる。
+    auto signedArea = [](const glm::vec2& a, const glm::vec2& b,
+                         const glm::vec2& p) {
+        return (b.x - a.x) * (p.y - a.y) -
+               (b.y - a.y) * (p.x - a.x);
+    };
+
+    const float radiusSquared = radius * radius;
+    for (const CollisionTriangle& triangle : collisionTriangles) {
+        // 高さが重ならない橋、上階、地下形状は水平判定から除外する。
+        if (top < triangle.minY || bottom > triangle.maxY) continue;
+        const float d0 = segmentDistanceSquared(point, triangle.a, triangle.b);
+        const float d1 = segmentDistanceSquared(point, triangle.b, triangle.c);
+        const float d2 = segmentDistanceSquared(point, triangle.c, triangle.a);
+        // 円が三角形のいずれかの辺へ接触した場合。
+        if (std::min(d0, std::min(d1, d2)) < radiusSquared) return true;
+
+        const float s0 = signedArea(triangle.a, triangle.b, point);
+        const float s1 = signedArea(triangle.b, triangle.c, point);
+        const float s2 = signedArea(triangle.c, triangle.a, point);
+        const bool hasNegative = s0 < 0.0f || s1 < 0.0f || s2 < 0.0f;
+        const bool hasPositive = s0 > 0.0f || s1 > 0.0f || s2 > 0.0f;
+        // 円中心そのものが三角形内部に入った場合。
+        if (!(hasNegative && hasPositive)) return true;
+    }
+    return false;
+}
+
+float ImportedModel::sampleWalkableHeight(float x, float z,
+                                          float fallbackHeight,
+                                          float maxStepUp,
+                                          float footprintRadius) const
+{
+    float bestHeight = fallbackHeight;
+    bool found = false;
+
+    constexpr glm::vec2 unitSamples[] = {
+        { 0.0f, 0.0f }, { 1.0f, 0.0f }, { -1.0f, 0.0f },
+        { 0.0f, 1.0f }, { 0.0f, -1.0f },
+        { 0.7071f, 0.7071f }, { -0.7071f, 0.7071f },
+        { 0.7071f, -0.7071f }, { -0.7071f, -0.7071f }
+    };
+
+    for (const WalkableTriangle& triangle : walkableTriangles) {
+        const glm::vec2 a(triangle.a.x, triangle.a.z);
+        const glm::vec2 b(triangle.b.x, triangle.b.z);
+        const glm::vec2 c(triangle.c.x, triangle.c.z);
+        const glm::vec2 v0 = b - a;
+        const glm::vec2 v1 = c - a;
+        const float denominator = v0.x * v1.y - v1.x * v0.y;
+        if (std::abs(denominator) < 1e-7f) continue;
+
+        for (const glm::vec2& unitSample : unitSamples) {
+            const glm::vec2 point(x, z);
+            const glm::vec2 v2 = point + unitSample * footprintRadius - a;
+            const float u = (v2.x * v1.y - v1.x * v2.y) / denominator;
+            const float v = (v0.x * v2.y - v2.x * v0.y) / denominator;
+            const float w = 1.0f - u - v;
+            if (u < -0.002f || v < -0.002f || w < -0.002f) continue;
+
+            const float height = w * triangle.a.y + u * triangle.b.y + v * triangle.c.y;
+            if (height < fallbackHeight - 0.35f ||
+                height > fallbackHeight + maxStepUp) continue;
+            if (!found || height > bestHeight) {
+                bestHeight = height;
+                found = true;
+            }
+        }
+    }
+    return bestHeight;
+}
+
+bool ImportedModel::loadAnimationsFrom(const std::string& filePath, const std::string& clipName)
+{
+    if (bones.empty()) {
+        std::cerr << "loadAnimationsFrom: base model has no bones, load mesh first\n";
+        return false;
+    }
+
+    Assimp::Importer importer;
+    const aiScene* scene = importer.ReadFile(
+        filePath,
+        aiProcess_Triangulate | aiProcess_JoinIdenticalVertices
+    );
+    if (!scene || scene->mNumAnimations == 0) {
+        std::cerr << "loadAnimationsFrom: no animations in " << filePath << std::endl;
+        return false;
+    }
+
+    int added = 0;
+    for (unsigned int ai = 0; ai < scene->mNumAnimations; ++ai) {
+        const aiAnimation* a = scene->mAnimations[ai];
+        if (!a) continue;
+
+        AnimationClip clip{};
+        // clipNameが指定されていればその名前を使う、なければファイル名から生成
+        if (!clipName.empty()) {
+            clip.name = ai == 0 ? clipName : clipName + std::to_string(ai);
+        } else {
+            clip.name = a->mName.length > 0 ? a->mName.C_Str()
+                                             : "Anim_" + std::to_string(animations.size() + ai);
+        }
+        clip.duration = a->mDuration;
+        clip.ticksPerSecond = a->mTicksPerSecond > 0.0 ? a->mTicksPerSecond : 25.0;
+
+        for (unsigned int ci = 0; ci < a->mNumChannels; ++ci) {
+            const aiNodeAnim* ch = a->mChannels[ci];
+            const std::string channelName = ch->mNodeName.C_Str();
+            const bool isBaseBone = std::any_of(
+                bones.begin(), bones.end(), [&channelName](const Bone& bone) {
+                    return bone.name == channelName;
+                });
+            // Blenderのアニメーション専用FBXには、ボーン以外にArmature
+            // オブジェクトの移動・拡縮チャンネルが含まれる場合がある。
+            // これを基準モデルのルートノードへ適用するとキャラクター全体が
+            // 画面外へ移動するため、戦闘攻撃では実在ボーンだけを受理する。
+            if (clipName == "Basic_Attack" && !isBaseBone) continue;
+            Channel channel{};
+            channel.nodeName = channelName;
+            for (unsigned int i = 0; i < ch->mNumPositionKeys; ++i) {
+                const aiVectorKey& k = ch->mPositionKeys[i];
+                channel.positions.push_back({ k.mTime, glm::vec3(k.mValue.x, k.mValue.y, k.mValue.z) });
+            }
+            // 攻撃はその場で再生する。Hipsの回転は残すが、平行移動は
+            // 先頭キーへ固定してFBX内部のルートモーションを除去する。
+            if (clipName == "Basic_Attack" && channelName == "Hips" &&
+                !channel.positions.empty()) {
+                const glm::vec3 rootPosition = channel.positions.front().value;
+                for (VecKey& key : channel.positions) key.value = rootPosition;
+            }
+            for (unsigned int i = 0; i < ch->mNumRotationKeys; ++i) {
+                const aiQuatKey& k = ch->mRotationKeys[i];
+                channel.rotations.push_back({ k.mTime, glm::quat(k.mValue.w, k.mValue.x, k.mValue.y, k.mValue.z) });
+            }
+            for (unsigned int i = 0; i < ch->mNumScalingKeys; ++i) {
+                const aiVectorKey& k = ch->mScalingKeys[i];
+                channel.scales.push_back({ k.mTime, glm::vec3(k.mValue.x, k.mValue.y, k.mValue.z) });
+            }
+            clip.channels.push_back(channel);
+        }
+        animations.push_back(clip);
+        ++added;
+        std::cout << "  Loaded animation \"" << clip.name << "\" from " << filePath
+                  << " (duration=" << clip.duration << ")\n";
+    }
+
+    animated = !animations.empty() && !bones.empty();
+    return added > 0;
+}
+
+bool ImportedModel::loadAnimationJson(const std::string& filePath)
+{
+    if (bones.empty()) {
+        std::cerr << "Could not load animation JSON: model has no bones\n";
+        return false;
+    }
+    std::ifstream input(filePath);
+    if (!input) {
+        std::cerr << "Could not open animation JSON: " << filePath << "\n";
+        return false;
+    }
+    try {
+        nlohmann::json data;
+        input >> data;
+        AnimationClip clip{};
+        clip.name = data.value("name", "Walk_Loop");
+        clip.ticksPerSecond = data.value("fps", 30.0);
+        clip.duration = std::max(1, data.value("frames", 25) - 1);
+        clip.poseDelta = true;
+        for (auto& item : data.at("channels").items()) {
+            Channel channel{};
+            channel.nodeName = item.key();
+            const auto& value = item.value();
+            const auto& positions = value.at("position");
+            const auto& rotations = value.at("rotation");
+            const auto& scales = value.at("scale");
+            const size_t count = std::min({ positions.size(), rotations.size(), scales.size() });
+            for (size_t frame = 0; frame < count; ++frame) {
+                channel.positions.push_back({ static_cast<double>(frame),
+                    glm::vec3(positions[frame][0].get<float>(), positions[frame][1].get<float>(),
+                              positions[frame][2].get<float>()) });
+                channel.rotations.push_back({ static_cast<double>(frame),
+                    glm::quat(rotations[frame][0].get<float>(), rotations[frame][1].get<float>(),
+                              rotations[frame][2].get<float>(), rotations[frame][3].get<float>()) });
+                channel.scales.push_back({ static_cast<double>(frame),
+                    glm::vec3(scales[frame][0].get<float>(), scales[frame][1].get<float>(),
+                              scales[frame][2].get<float>()) });
+            }
+            clip.channels.push_back(std::move(channel));
+        }
+        animations.push_back(std::move(clip));
+        animated = !animations.empty() && !bones.empty();
+        std::cout << "Loaded custom animation: " << filePath
+                  << " (" << animations.back().channels.size() << " channels)" << std::endl;
+        return true;
+    }
+    catch (const std::exception& error) {
+        std::cerr << "Could not load animation JSON '" << filePath
+                  << "': " << error.what() << std::endl;
+        return false;
+    }
+}
+
+bool ImportedModel::playAnimationByIndex(size_t index)
+{
+    if (!animated || index >= animations.size()) return false;
+    if (activeAnimationIndex != index) {
+        transitionFromVertices = gpuVertices;
+        animationTransitionRemaining = animationTransitionDuration;
+        activeAnimationIndex = index;
+        animationTimeSeconds = 0.0f;
+    }
+    return true;
+}
+
+std::string ImportedModel::getAnimationName(size_t index) const
+{
+    if (index >= animations.size()) return "";
+    return animations[index].name;
+}
+
+int ImportedModel::findAnimationByKeywords(const std::vector<std::string>& keywords) const
+{
+    if (!animated) return -1;
+    for (const auto& kw : keywords) {
+        std::string lowKw;
+        for (char c : kw) lowKw += (char)std::tolower((unsigned char)c);
+        for (size_t i = 0; i < animations.size(); ++i) {
+            std::string lowName;
+            for (char c : animations[i].name) lowName += (char)std::tolower((unsigned char)c);
+            if (lowName.find(lowKw) != std::string::npos) return (int)i;
+        }
+    }
+    return -1;
+}
+
+bool ImportedModel::playAnimationByName(const std::string& keyword)
+{
+    if (!animated || keyword.empty()) return false;
+
+    std::string loweredKeyword;
+    for (char c : keyword) loweredKeyword += (char)std::tolower((unsigned char)c);
+    for (size_t i = 0; i < animations.size(); ++i) {
+        std::string lowName;
+        for (char c : animations[i].name) lowName += (char)std::tolower((unsigned char)c);
+        if (lowName.find(loweredKeyword) != std::string::npos) {
+            return playAnimationByIndex(i);
+        }
+    }
+    return false;
+}
+
+void ImportedModel::resetAnimationPose()
+{
+    if (!animated || animations.empty()) return;
+    animationTimeSeconds = 0.0f;
+    updateAnimation(0.0f);
+}
+
+void ImportedModel::updateAnimation(float deltaSeconds)
+{
+    if (!animated || animations.empty() || sourceVertices.empty()) return;
+
+    animationTimeSeconds += std::max(0.0f, deltaSeconds);
+    if (activeAnimationIndex >= animations.size()) activeAnimationIndex = 0;
+    const AnimationClip& clip = animations[activeAnimationIndex];
+    if (clip.duration <= 0.0 || clip.ticksPerSecond <= 0.0) return;
+
+    double animationTicks = std::fmod(animationTimeSeconds * clip.ticksPerSecond, clip.duration);
+
+    auto interpolateVec = [animationTicks](const std::vector<VecKey>& keys, const glm::vec3& fallback) {
+        if (keys.empty()) return fallback;
+        if (keys.size() == 1) return keys[0].value;
+
+        size_t index = keys.size() - 2;
+        for (size_t i = 0; i + 1 < keys.size(); ++i) {
+            if (animationTicks < keys[i + 1].time) {
+                index = i;
+                break;
+            }
+        }
+        size_t nextIndex = std::min(index + 1, keys.size() - 1);
+        double frameDelta = keys[nextIndex].time - keys[index].time;
+        float factor = frameDelta > 0.0 ? static_cast<float>((animationTicks - keys[index].time) / frameDelta) : 0.0f;
+        factor = std::max(0.0f, std::min(factor, 1.0f));
+        return glm::mix(keys[index].value, keys[nextIndex].value, factor);
+    };
+
+    auto interpolateQuat = [animationTicks](const std::vector<QuatKey>& keys) {
+        if (keys.empty()) return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        if (keys.size() == 1) return glm::normalize(keys[0].value);
+
+        size_t index = keys.size() - 2;
+        for (size_t i = 0; i + 1 < keys.size(); ++i) {
+            if (animationTicks < keys[i + 1].time) {
+                index = i;
+                break;
+            }
+        }
+        size_t nextIndex = std::min(index + 1, keys.size() - 1);
+        double frameDelta = keys[nextIndex].time - keys[index].time;
+        float factor = frameDelta > 0.0 ? static_cast<float>((animationTicks - keys[index].time) / frameDelta) : 0.0f;
+        factor = std::max(0.0f, std::min(factor, 1.0f));
+        return glm::normalize(glm::slerp(keys[index].value, keys[nextIndex].value, factor));
+    };
+
+    auto findChannel = [&clip](const std::string& nodeName) -> const Channel* {
+        for (const Channel& channel : clip.channels) {
+            if (channel.nodeName == nodeName) return &channel;
+        }
+        return nullptr;
+    };
+
+    auto findBone = [this](const std::string& boneName) -> int {
+        for (size_t i = 0; i < bones.size(); ++i) {
+            if (bones[i].name == boneName) return static_cast<int>(i);
+        }
+        return -1;
+    };
+
+    std::function<void(int, const glm::mat4&)> updateNode = [&](int nodeIndex, const glm::mat4& parentTransform) {
+        const Node& node = nodes[nodeIndex];
+        glm::mat4 localTransform = node.transform;
+        if (const Channel* channel = findChannel(node.name)) {
+            glm::vec3 translation = interpolateVec(channel->positions, glm::vec3(0.0f));
+            glm::quat rotation = interpolateQuat(channel->rotations);
+            glm::vec3 scale = interpolateVec(channel->scales, glm::vec3(1.0f));
+            glm::mat4 animatedTransform =
+                glm::translate(glm::mat4(1.0f), translation) *
+                glm::mat4_cast(rotation) *
+                glm::scale(glm::mat4(1.0f), scale);
+            // Blenderの姿勢カーブはレスト姿勢からの差分だが、Assimpが読む
+            // FBXチャンネルは完全なローカル変換である。JSONクリップの場合は
+            // レスト変換へ差分を合成し、ボーンが原点へ潰れるのを防ぐ。
+            localTransform = clip.poseDelta
+                ? node.transform * animatedTransform
+                : animatedTransform;
+        }
+
+        glm::mat4 globalTransform = parentTransform * localTransform;
+        int boneIndex = findBone(node.name);
+        if (boneIndex >= 0) {
+            // offsetを掛ける前の行列がボーン原点の現在位置を表す。
+            // finalTransformは頂点スキニング専用なので、武器追従には使用しない。
+            bones[boneIndex].poseTransform = globalTransform;
+            bones[boneIndex].finalTransform = globalTransform * bones[boneIndex].offset;
+        }
+
+        for (int childIndex : node.children) {
+            updateNode(childIndex, globalTransform);
+        }
+    };
+
+    if (!nodes.empty()) {
+        updateNode(0, glm::mat4(1.0f));
+    }
+
+    for (size_t vertexIndex = 0; vertexIndex < sourceVertices.size(); ++vertexIndex) {
+        const VertexSource& source = sourceVertices[vertexIndex];
+        glm::vec4 skinnedPosition(0.0f);
+        glm::vec3 skinnedNormal(0.0f);
+        float totalWeight = 0.0f;
+
+        for (int i = 0; i < 4; ++i) {
+            int boneIndex = source.boneIds[i];
+            float weight = source.boneWeights[i];
+            if (boneIndex < 0 || boneIndex >= static_cast<int>(bones.size()) || weight <= 0.0f) continue;
+
+            const glm::mat4& transform = bones[boneIndex].finalTransform;
+            skinnedPosition += transform * glm::vec4(source.position, 1.0f) * weight;
+            skinnedNormal += glm::mat3(transform) * source.normal * weight;
+            totalWeight += weight;
+        }
+
+        if (totalWeight <= 0.0001f) {
+            skinnedPosition = worldTransform * glm::vec4(source.position, 1.0f);
+            skinnedNormal = worldNormalMatrix * source.normal;
+        }
+
+        gpuVertices[vertexIndex].position = (glm::vec3(skinnedPosition) - normalizationCenter) / normalizationScale;
+        gpuVertices[vertexIndex].normal = glm::normalize(skinnedNormal);
+        gpuVertices[vertexIndex].color = source.color;
+        gpuVertices[vertexIndex].texCoords = source.texCoords;
+    }
+
+    if (animationTransitionRemaining > 0.0f &&
+        transitionFromVertices.size() == gpuVertices.size()) {
+        animationTransitionRemaining = std::max(
+            0.0f, animationTransitionRemaining - std::max(0.0f, deltaSeconds));
+        float t = 1.0f - animationTransitionRemaining /
+                         std::max(animationTransitionDuration, 0.001f);
+        t = t * t * (3.0f - 2.0f * t);
+        for (size_t i = 0; i < gpuVertices.size(); ++i) {
+            gpuVertices[i].position = glm::mix(
+                transitionFromVertices[i].position, gpuVertices[i].position, t);
+            gpuVertices[i].normal = glm::normalize(glm::mix(
+                transitionFromVertices[i].normal, gpuVertices[i].normal, t));
+        }
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, gpuVertices.size() * sizeof(VertexGpu), gpuVertices.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+bool ImportedModel::getBonePosePosition(const std::string& boneName, glm::vec3& position) const
+{
+    for (const Bone& bone : bones) {
+        if (bone.name != boneName) continue;
+
+        glm::vec3 modelPosition = glm::vec3(
+            bone.poseTransform * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        position = (modelPosition - normalizationCenter) /
+            std::max(normalizationScale, 0.0001f);
+        return true;
+    }
+    return false;
+}
+
+bool ImportedModel::getBonePoseTransform(const std::string& boneName, glm::mat4& transform) const
+{
+    for (const Bone& bone : bones) {
+        if (bone.name != boneName) continue;
+
+        glm::vec3 modelPosition = glm::vec3(
+            bone.poseTransform * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        glm::mat3 rotation(bone.poseTransform);
+        // 階層に含まれるスケールを除去し、装備モデルの寸法を一定に保つ。
+        for (int column = 0; column < 3; ++column) {
+            float length = glm::length(rotation[column]);
+            if (length > 0.0001f) rotation[column] /= length;
+        }
+
+        transform = glm::mat4(rotation);
+        transform[3] = glm::vec4(
+            (modelPosition - normalizationCenter) /
+                std::max(normalizationScale, 0.0001f),
+            1.0f);
+        return true;
+    }
+    return false;
+}
+
+void ImportedModel::draw() const
+{
+    if (!isLoaded()) return;
+    glBindVertexArray(vao);
+
+    GLint currentProgram = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+    GLint useTextureLocation = currentProgram ? glGetUniformLocation(static_cast<GLuint>(currentProgram), "useTexture") : -1;
+    GLint diffuseTextureLocation = currentProgram ? glGetUniformLocation(static_cast<GLuint>(currentProgram), "diffuseTexture") : -1;
+    GLint roughnessLocation = currentProgram ? glGetUniformLocation(static_cast<GLuint>(currentProgram), "materialRoughness") : -1;
+    GLint metallicLocation = currentProgram ? glGetUniformLocation(static_cast<GLuint>(currentProgram), "materialMetallic") : -1;
+    GLint emissionLocation = currentProgram ? glGetUniformLocation(static_cast<GLuint>(currentProgram), "materialEmission") : -1;
+    GLint opacityLocation = currentProgram ? glGetUniformLocation(static_cast<GLuint>(currentProgram), "opacity") : -1;
+    if (diffuseTextureLocation >= 0) glUniform1i(diffuseTextureLocation, 0);
+
+    if (drawParts.empty()) {
+        if (useTextureLocation >= 0) glUniform1i(useTextureLocation, 0);
+        glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+    }
+    else {
+        for (const DrawPart& part : drawParts) {
+            if (roughnessLocation >= 0) glUniform1f(roughnessLocation, part.roughness);
+            if (metallicLocation >= 0) glUniform1f(metallicLocation, part.metallic);
+            if (emissionLocation >= 0) glUniform3fv(emissionLocation, 1, &part.emission.x);
+            if (opacityLocation >= 0) glUniform1f(opacityLocation, part.opacity);
+            if (part.opacity < 0.999f) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            }
+            if (part.textureId != 0) {
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, part.textureId);
+                if (useTextureLocation >= 0) glUniform1i(useTextureLocation, 1);
+            }
+            else if (useTextureLocation >= 0) {
+                glUniform1i(useTextureLocation, 0);
+            }
+            glDrawElements(
+                GL_TRIANGLES,
+                part.indexCount,
+                GL_UNSIGNED_INT,
+                reinterpret_cast<void*>(static_cast<size_t>(part.indexOffset) * sizeof(unsigned int))
+            );
+        }
+    }
+
+    if (emissionLocation >= 0) glUniform3f(emissionLocation, 0.0f, 0.0f, 0.0f);
+    if (opacityLocation >= 0) glUniform1f(opacityLocation, 1.0f);
+    if (useTextureLocation >= 0) glUniform1i(useTextureLocation, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}

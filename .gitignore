@@ -1,0 +1,45 @@
+.# Visual Studio
+.vs/
+*.gguf
+vcpkg/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# ビルド出力
+Debug/
+Release/
+x64/
+x86/
+Win32/
+out/
+build/
+
+# C++生成ファイル
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.ipdb
+*.iobj
+*.tlog
+*.lastbuildstate
+*.recipe
+*.log
+
+
+# 実行ファイル・ライブラリ
+*.exe
+*.dll
+*.lib
+*.exp
+
+# ImGui設定
+imgui.ini
+
+# Blender一時ファイル
+*.blend1
+*.blend2
+*.blend@

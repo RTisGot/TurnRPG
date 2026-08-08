@@ -1,0 +1,38 @@
+#pragma once
+
+//@brief
+#include<string>
+#include<map>
+//
+
+struct Character
+{
+	std::string name;   
+	int hp;             
+	int power;          
+	int defense;        
+	int speed;          
+	int critical;       
+	int criticalDamage; 
+
+	int currentHp;
+	int isAlly;
+	bool isGuarding = false;
+	int turnGauge = 0;
+
+	int charge = 0;
+	int maxCharge = 5;
+	int energy = 0;
+	int maxEnergy = 100;
+
+	// 潮防は敵が攻撃へ耐える安定度を表す。0になるとBreak状態へ入り、
+	// 次の被ダメージが増加し、行動順が後ろへ押し戻される。
+	int tideguard = 0;
+	int maxTideguard = 0;
+	bool isBroken = false;
+	std::string affinity = "Tide";
+
+	bool isEnemy() const;
+
+
+};
