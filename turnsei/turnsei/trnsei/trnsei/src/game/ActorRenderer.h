@@ -4,25 +4,25 @@
 
 class ImportedModel;
 
-// •àsƒAƒjƒ[ƒVƒ‡ƒ“Ä¶ó‘Ô‚ð•ÛŽ
+// æ­©è¡Œã‚¢ãƒ‹ãƒ¡ãƒ¼ã‚·ãƒ§ãƒ³å†ç”ŸçŠ¶æ…‹ã‚’ä¿æŒ
 struct WalkAnimState
 {
-    // ƒAƒjƒ[ƒVƒ‡ƒ“Œo‰ßŽžŠÔi•bj
+    // ã‚¢ãƒ‹ãƒ¡ãƒ¼ã‚·ãƒ§ãƒ³çµŒéŽæ™‚é–“ï¼ˆç§’ï¼‰
     float time = 0.0f;
 
-    // •àsƒ‚[ƒVƒ‡ƒ“‚Ö‚ÌƒuƒŒƒ“ƒh—¦i0.0`1.0j
+    // æ­©è¡Œãƒ¢ãƒ¼ã‚·ãƒ§ãƒ³ã¸ã®ãƒ–ãƒ¬ãƒ³ãƒ‰çŽ‡ï¼ˆ0.0ï½ž1.0ï¼‰
     float blend = 0.0f;
 };
 
-// ƒLƒƒƒ‰ƒNƒ^[•`‰æ—pGPUƒŠƒ\[ƒX‚ð‰Šú‰»
+// ã‚­ãƒ£ãƒ©ã‚¯ã‚¿ãƒ¼æç”»ç”¨GPUãƒªã‚½ãƒ¼ã‚¹ã‚’åˆæœŸåŒ–
 void InitActorRenderer();
 
-// ƒLƒƒƒ‰ƒNƒ^[•`‰æ—pƒVƒF[ƒ_[ƒvƒƒOƒ‰ƒ€
+// ã‚­ãƒ£ãƒ©ã‚¯ã‚¿ãƒ¼æç”»ç”¨ã‚·ã‚§ãƒ¼ãƒ€ãƒ¼ãƒ—ãƒ­ã‚°ãƒ©ãƒ 
 GLuint GetActorShader();
 
-// ƒLƒƒƒ‰ƒNƒ^[‚ð•`‰æ
+// ã‚­ãƒ£ãƒ©ã‚¯ã‚¿ãƒ¼ã‚’æç”»
 //
-// isWalking ‚Æ walkAnim‚ðŽw’è‚Å•àsƒAƒjƒ[ƒVƒ‡ƒ“‚ð“K—p
+// isWalking ã¨ walkAnimã‚’æŒ‡å®šã§æ­©è¡Œã‚¢ãƒ‹ãƒ¡ãƒ¼ã‚·ãƒ§ãƒ³ã‚’é©ç”¨
 void DrawActor(
     const glm::vec3& position,
     const glm::vec3& scale,
@@ -35,9 +35,9 @@ void DrawActor(
     bool isWalking = false,
     WalkAnimState* walkAnim = nullptr);
 
-// •àsó‘Ô‚É‰ž‚¶‚ÄƒAƒjƒ[ƒVƒ‡ƒ“ó‘Ô‚ðXV
+// æ­©è¡ŒçŠ¶æ…‹ã«å¿œã˜ã¦ã‚¢ãƒ‹ãƒ¡ãƒ¼ã‚·ãƒ§ãƒ³çŠ¶æ…‹ã‚’æ›´æ–°
 //
-// deltaTime ‘OƒtƒŒ[ƒ€‚©‚ç‚ÌŒo‰ßŽžŠÔi•bj
+// deltaTime å‰ãƒ•ãƒ¬ãƒ¼ãƒ ã‹ã‚‰ã®çµŒéŽæ™‚é–“ï¼ˆç§’ï¼‰
 void UpdateWalkAnimation(
     WalkAnimState& state,
     float deltaTime,
