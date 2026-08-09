@@ -1,4 +1,4 @@
-Copyright (c) 2026 制作者名
+Copyright (c) 2026 Tachihara Reo
 All Rights Reserved.
 
 本リポジトリのソースコードおよびオリジナル素材について、
