@@ -1,4 +1,4 @@
-"""Mixamoの抜刀と片手剣斬撃をゲーム固有リグへワールド空間でリターゲットする。
+﻿"""Mixamoの抜刀と片手剣斬撃をゲーム固有リグへワールド空間でリターゲットする。
 
 ローカルEuler角の単純コピーは、ボーンロールが異なるリグ間では肩・肘・手首を
 別方向へ回してしまう。本ツールは各ボーンのレスト姿勢からワールド回転差を求め、
@@ -9,6 +9,7 @@ import bpy
 import json
 import math
 import os
+import sys
 from mathutils import Matrix, Quaternion, Vector
 
 
@@ -17,8 +18,18 @@ TARGET_BLEND = os.path.join(ROOT, "Resource", "Character.blend")
 BASE_JSON = os.path.join(ROOT, "Resource", "Character_Walk.json")
 OUTPUT_JSON = os.path.join(ROOT, "Resource", "Character_Attack.json")
 OUTPUT_BLEND = os.path.join(ROOT, "Resource", "Character_CombatAnimation.blend")
-DRAW_FBX = r"C:\Users\rere0\Downloads\Draw Sword 1.fbx"
-SLASH_FBX = r"C:\Users\rere0\Downloads\Stable Sword Inward Slash.fbx"
+INPUT_DIR = os.path.join(os.path.dirname(__file__), "input")
+SCRIPT_ARGS = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+DRAW_FBX = (
+    os.path.abspath(SCRIPT_ARGS[0])
+    if len(SCRIPT_ARGS) >= 1
+    else os.path.join(INPUT_DIR, "Draw Sword 1.fbx")
+)
+SLASH_FBX = (
+    os.path.abspath(SCRIPT_ARGS[1])
+    if len(SCRIPT_ARGS) >= 2
+    else os.path.join(INPUT_DIR, "Stable Sword Inward Slash.fbx")
+)
 FPS = 30.0
 IK_REACH_SAMPLES = []
 

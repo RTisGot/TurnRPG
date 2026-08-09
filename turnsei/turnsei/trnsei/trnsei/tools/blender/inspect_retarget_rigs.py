@@ -1,11 +1,18 @@
-"""ゲームリグとMixamoリグの階層・レスト軸・骨長を比較出力する。"""
+﻿"""ゲームリグとMixamoリグの階層・レスト軸・骨長を比較出力する。"""
 
 import bpy
 import os
+import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 TARGET = os.path.join(ROOT, "Resource", "Character.blend")
-SOURCE = r"C:\Users\rere0\Downloads\Stable Sword Inward Slash.fbx"
+INPUT_DIR = os.path.join(os.path.dirname(__file__), "input")
+SCRIPT_ARGS = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+SOURCE = (
+    os.path.abspath(SCRIPT_ARGS[0])
+    if SCRIPT_ARGS
+    else os.path.join(INPUT_DIR, "Stable Sword Inward Slash.fbx")
+)
 
 
 def dump(label, armature, names):

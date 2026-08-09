@@ -1,4 +1,4 @@
-"""Mixamoアニメーションをゲームリグへ正規のワールド空間差分でリターゲットする。
+﻿"""Mixamoアニメーションをゲームリグへ正規のワールド空間差分でリターゲットする。
 
 重要事項:
 - Mixamo FBXのArmatureオブジェクトに含まれるX=90度、scale=0.01も計算へ含める。
@@ -10,6 +10,7 @@ import bpy
 import json
 import math
 import os
+import sys
 from mathutils import Matrix, Quaternion, Vector
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -17,8 +18,18 @@ TARGET_FBX = os.path.join(ROOT, "Resource", "Character_Gameplay.fbx")
 OUTPUT_JSON = os.path.join(ROOT, "Resource", "Character_Attack.json")
 OUTPUT_BLEND = os.path.join(ROOT, "Resource", "Character_CombatAnimation.blend")
 OUTPUT_FBX = os.path.join(ROOT, "Resource", "Character_Attack_Baked.fbx")
-DRAW_FBX = r"C:\Users\rere0\Downloads\Draw Sword 1.fbx"
-SLASH_FBX = r"C:\Users\rere0\Downloads\Stable Sword Inward Slash.fbx"
+INPUT_DIR = os.path.join(os.path.dirname(__file__), "input")
+SCRIPT_ARGS = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+DRAW_FBX = (
+    os.path.abspath(SCRIPT_ARGS[0])
+    if len(SCRIPT_ARGS) >= 1
+    else os.path.join(INPUT_DIR, "Draw Sword 1.fbx")
+)
+SLASH_FBX = (
+    os.path.abspath(SCRIPT_ARGS[1])
+    if len(SCRIPT_ARGS) >= 2
+    else os.path.join(INPUT_DIR, "Stable Sword Inward Slash.fbx")
+)
 FPS = 30.0
 
 BONE_MAP = {
