@@ -41,5 +41,10 @@ C:\dev\vcpkg\vcpkg.exe integrate install
 初回ビルド時に、`vcpkg.json`で宣言された依存ライブラリが
 `vcpkg_installed`へ自動的に復元されます。
 
+【ライセンスと素材出典】
+- [サードパーティライブラリ一覧](THIRD_PARTY_NOTICES.md)
+- [素材出典一覧](ASSET_CREDITS.md)
+- [ライセンス全文](licenses/)
+
 ※ Windowsの保護画面が表示された場合は、提出元を確認したうえで
 「詳細情報」→「実行」を選択してください。
